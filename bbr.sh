@@ -51,28 +51,6 @@ check_system() {
     log_info "检测到Debian版本: $debian_version"
 }
 
-# 备份现有配置
-backup_config() {
-    local backup_dir="/root/sysctl_backup_$(date +%Y%m%d_%H%M%S)"
-    mkdir -p "$backup_dir"
-    
-    log_info "创建配置备份到: $backup_dir"
-    
-    # 备份 /etc/sysctl.conf（如果存在）
-    if [[ -f /etc/sysctl.conf ]]; then
-        cp /etc/sysctl.conf "$backup_dir/"
-        log_info "已备份 /etc/sysctl.conf"
-    fi
-    
-    # 备份 /etc/sysctl.d/ 目录
-    if [[ -d /etc/sysctl.d ]]; then
-        cp -r /etc/sysctl.d "$backup_dir/"
-        log_info "已备份 /etc/sysctl.d/ 目录"
-    fi
-    
-    echo "$backup_dir" > /tmp/bbr_backup_path
-    log_success "配置备份完成"
-}
 
 # 清理旧配置
 clean_old_config() {
@@ -101,61 +79,10 @@ create_sysctl_config() {
     log_info "创建新的sysctl配置文件..."
     
     cat > /etc/sysctl.d/99-sysctl.conf << 'EOF'
-# Debian BBR 优化配置
-# 生成时间: $(date)
-
-# ==========================================
-# TCP BBR 拥塞控制算法
-# ==========================================
-# 开启BBR拥塞控制算法
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
-
-# ==========================================
-# TCP FQ (Fair Queue) 调度器优化
-# ==========================================
-# FQ调度器相关参数
-net.core.netdev_max_backlog = 5000
-net.core.netdev_budget = 600
-
-# ==========================================
-# TCP ECN (Explicit Congestion Notification)
-# ==========================================
-# 开启ECN显式拥塞通知
 net.ipv4.tcp_ecn = 1
 
-# ==========================================
-# TCP 性能优化参数
-# ==========================================
-# TCP窗口缩放
-net.ipv4.tcp_window_scaling = 1
-
-# TCP时间戳
-net.ipv4.tcp_timestamps = 1
-
-# TCP SACK支持
-net.ipv4.tcp_sack = 1
-
-# TCP Fast Open
-net.ipv4.tcp_fastopen = 3
-
-# TCP缓冲区大小
-net.core.rmem_default = 262144
-net.core.rmem_max = 16777216
-net.core.wmem_default = 262144
-net.core.wmem_max = 16777216
-net.ipv4.tcp_rmem = 4096 87380 16777216
-net.ipv4.tcp_wmem = 4096 16384 16777216
-
-# TCP连接优化
-net.ipv4.tcp_fin_timeout = 30
-net.ipv4.tcp_keepalive_time = 1200
-net.ipv4.tcp_max_syn_backlog = 8192
-net.ipv4.tcp_max_tw_buckets = 5000
-
-# ==========================================
-# IPv6 配置
-# ==========================================
 EOF
     
     log_success "基础配置已写入 /etc/sysctl.d/99-sysctl.conf"
@@ -190,12 +117,6 @@ EOF
 net.ipv6.conf.all.disable_ipv6 = 0
 net.ipv6.conf.default.disable_ipv6 = 0
 net.ipv6.conf.lo.disable_ipv6 = 0
-
-# IPv6优化参数
-net.ipv6.conf.all.forwarding = 0
-net.ipv6.conf.default.forwarding = 0
-net.ipv6.conf.all.accept_ra = 1
-net.ipv6.conf.default.accept_ra = 1
 EOF
                 log_success "IPv6已启用并优化"
                 break
@@ -259,12 +180,6 @@ show_summary() {
     echo "✓ 已启用 ECN 显式拥塞通知"
     echo "✓ 已优化 TCP 性能参数"
     
-    if [[ -f /tmp/bbr_backup_path ]]; then
-        local backup_path=$(cat /tmp/bbr_backup_path)
-        echo "✓ 配置备份位置: $backup_path"
-        rm -f /tmp/bbr_backup_path
-    fi
-    
     echo
     log_info "可用命令验证："
     echo "  查看当前拥塞控制算法: sysctl net.ipv4.tcp_congestion_control"
@@ -273,21 +188,6 @@ show_summary() {
     echo "  查看ECN状态: sysctl net.ipv4.tcp_ecn"
     echo "  查看所有BBR相关配置: sysctl -a | grep bbr"
     echo
-}
-
-# 恢复配置函数（可选）
-restore_config() {
-    if [[ -f /tmp/bbr_backup_path ]]; then
-        local backup_path=$(cat /tmp/bbr_backup_path)
-        if [[ -d "$backup_path" ]]; then
-            log_info "恢复备份配置..."
-            cp -r "$backup_path"/* /etc/
-            sysctl -p
-            log_success "配置已恢复"
-        fi
-    else
-        log_error "未找到备份路径"
-    fi
 }
 
 # 主函数
@@ -301,12 +201,11 @@ main() {
     check_system
     
     echo "此脚本将执行以下操作："
-    echo "1. 备份现有配置"
-    echo "2. 删除 /etc/sysctl.conf"
-    echo "3. 清空 /etc/sysctl.d/ 目录"
-    echo "4. 创建新的 /etc/sysctl.d/99-sysctl.conf"
-    echo "5. 启用 BBR、FQ、ECN 优化"
-    echo "6. 配置 IPv6（可选）"
+    echo "1. 删除 /etc/sysctl.conf"
+    echo "2. 清空 /etc/sysctl.d/ 目录"
+    echo "3. 创建新的 /etc/sysctl.d/99-sysctl.conf"
+    echo "4. 启用 BBR、FQ、ECN 优化"
+    echo "5. 配置 IPv6（可选）"
     echo
     
     read -p "是否继续? [y/N]: " confirm
@@ -316,7 +215,6 @@ main() {
     fi
     
     echo
-    backup_config
     clean_old_config
     create_sysctl_config
     configure_ipv6
