@@ -1,7 +1,15 @@
 # Debian BBR 一键管理脚本
 
-采用"干净写入"策略：任何操作都不做备份，直接删除所有包含网络参数的
-sysctl 配置文件，保证系统上不存在任何可能影响 BBR 的旧参数残留。
+BBR、TCP 缓冲区调优、高并发阈值三套配置**互不冲突，可叠加生效**，
+各自写入独立配置文件：
+
+| 配置 | 文件 |
+|---|---|
+| BBR 拥塞控制 | `/etc/sysctl.d/99-bbr.conf` |
+| TCP 调优 | `/etc/sysctl.d/99-bbr-tune.conf` |
+| 高并发调优 | `/etc/sysctl.d/99-bbr-concurrency.conf` |
+
+重复执行同一功能会覆盖自身文件；删除操作才清理配置，且不做备份。
 
 ## 一键运行
 
@@ -23,7 +31,7 @@ sudo bash bbr.sh
 
 ```
   1) 开启 BBR
-  2) 删除 BBR
+  2) 删除全部配置
   3) TCP 调优
   4) 高并发调优
   0) 退出
@@ -33,10 +41,27 @@ sudo bash bbr.sh
 
 | 操作 | 行为 |
 |---|---|
-| 开启 BBR | 删除所有含 `net.*` 参数的 sysctl 文件 → 干净写入 `/etc/sysctl.d/99-bbr.conf`→ 立即应用并验证 |
-| TCP 调优 | 删除所有含 `net.*` 参数的 sysctl 文件 → 按输入的带宽×延迟计算 BDP，写入缓冲区参数 → 立即应用并验证 |
-| 高并发调优 | 删除所有含 `net.*` 参数的 sysctl 文件 → 写入大并发阈值参数→ 立即应用并验证 |
-| 删除 BBR | 删除所有含 `net.*` 参数的 sysctl 文件 → 恢复拥塞控制为默认 cubic |
+| 开启 BBR | 写入 `99-bbr.conf`（fq + bbr）→ 立即应用并验证 |
+| TCP 调优 | 写入 `99-bbr-tune.conf`（按输入的带宽×延迟计算缓冲区）→ 立即应用并验证 |
+| 高并发调优 | 写入 `99-bbr-concurrency.conf`（大并发阈值参数）→ 立即应用并验证 |
+| 删除全部配置 | 删除所有含 `net.*` 参数的 sysctl 文件 → 恢复拥塞控制为默认 cubic |
+
+三个功能可任意组合、按任意顺序执行，参数互不覆盖；`sysctl --system`
+会同时加载所有配置文件。
+
+## TCP 调优
+
+交互输入网络带宽与连接延迟，按 **BDP** 计算 socket 缓冲区：
+
+```
+BDP = 带宽 × 延迟 / 8
+缓冲区上限 = 2 × BDP
+```
+
+- 输入格式示例：带宽 `1000 / 500M / 1G / 1Gbps / 125MB/s`；延迟 `20 / 30ms / 0.5s`
+- 写入参数：`net.core.rmem_max`、`net.core.wmem_max`、`net.ipv4.tcp_rmem`、`net.ipv4.tcp_wmem`、`net.ipv4.tcp_slow_start_after_idle = 0`、`net.ipv4.tcp_notsent_lowat = 131072`
+- 缓冲区上限限制在 `[1MB, 64MB]` 内，且不超过系统总内存的 1/8，防止大 BDP 场景耗尽内存；默认缓冲区取上限的一半
+- 示例：`1G × 20ms` → BDP ≈ 2.5MB → 上限 5MB
 
 ## 高并发调优
 
@@ -67,29 +92,11 @@ sudo bash bbr.sh
 
 内核 6.x 确认纳入的参数：`tcp_notsent_lowat = 131072`。
 
-## TCP 调优
-
-交互输入网络带宽与连接延迟，按 **BDP** 计算 socket 缓冲区：
-
-```
-BDP = 带宽 × 延迟 / 8
-缓冲区上限 = 2 × BDP
-```
-
-- 输入格式示例：带宽 `1000 / 500M / 1G / 1Gbps / 125MB/s`；延迟 `20 / 30ms / 0.5s`
-- 写入参数：`net.core.rmem_max`、`net.core.wmem_max`、`net.ipv4.tcp_rmem`、`net.ipv4.tcp_wmem`、`net.ipv4.tcp_slow_start_after_idle = 0`、`net.ipv4.tcp_notsent_lowat = 131072`
-- 缓冲区上限限制在 `[1MB, 64MB]` 内，且不超过系统总内存的 1/8，防止大 BDP 场景耗尽内存；默认缓冲区取上限的一半
-- 示例：`1G × 20ms` → BDP ≈ 2.5MB → 上限 5MB
-
-> 注意：调优**不包含** BBR 拥塞控制。按"干净写入"策略，执行调优会删除所有含 `net.*` 参数的文件，包括已开启的 BBR 配置；如需 BBR 请另行选择菜单 1。
-
-清理范围：`/run/sysctl.d`、`/etc/sysctl.d`、`/usr/local/lib/sysctl.d`、
-`/usr/lib/sysctl.d` 及 `/etc/sysctl.conf`。
-
 ## 重要风险提示
 
-- **无备份，不可恢复**。执行前会列出待删除文件清单并要求确认。
+- 菜单 2 删除全部配置：**无备份，不可恢复**。执行前会列出待删除文件清单并要求确认。
 - 可能被删除的文件包括：
+  - `/etc/sysctl.d/99-bbr.conf`、`99-bbr-tune.conf`、`99-bbr-concurrency.conf`
   - `/etc/sysctl.conf` 或 `/etc/sysctl.d/99-sysctl.conf`
   - `/usr/lib/sysctl.d/50-default.conf`
 - 其余未写入的运行时参数在重启后恢复内核默认。

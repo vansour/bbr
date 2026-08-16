@@ -2,12 +2,12 @@
 #=============================================================
 # Debian / Ubuntu BBR 一键管理脚本
 #
-#  开启: 删除所有包含网络参数的 sysctl 文件 → 干净写入新配置
-#  调优: 删除所有包含网络参数的 sysctl 文件 → 按带宽×延迟计算并写入缓冲区参数
-#  并发: 删除所有包含网络参数的 sysctl 文件 → 写入服务器大并发阈值参数
-#  删除: 删除所有包含网络参数的 sysctl 文件
+#  开启: 写入 99-bbr.conf（bbr + fq）
+#  调优: 写入 99-bbr-tune.conf（按带宽×延迟计算的缓冲区参数）
+#  并发: 写入 99-bbr-concurrency.conf（服务器大并发阈值参数）
+#  删除: 删除所有包含网络参数的 sysctl 文件，恢复默认
 #
-#  所有操作不做任何备份
+#  三个配置互不冲突、可叠加生效；删除操作不做备份
 #  用法: sudo bash bbr.sh
 #=============================================================
 
@@ -21,6 +21,8 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 CONF_FILE="/etc/sysctl.d/99-bbr.conf"
+TUNE_CONF="/etc/sysctl.d/99-bbr-tune.conf"
+CONC_CONF="/etc/sysctl.d/99-bbr-concurrency.conf"
 SYSCTL_DIRS="/run/sysctl.d /etc/sysctl.d /usr/local/lib/sysctl.d /usr/lib/sysctl.d"
 
 ok()   { echo -e "${GREEN}[✓]${NC} $*"; }
@@ -147,7 +149,7 @@ delete_net_files() {
 }
 
 #-------------------------------------------------------------
-# 开启 BBR: 清理全部网络参数文件 → 干净写入
+# 开启 BBR: 写入独立配置文件，与其他调优叠加生效
 #-------------------------------------------------------------
 
 enable_bbr() {
@@ -160,10 +162,7 @@ enable_bbr() {
     fi
 
     echo
-    info "第 1 步 / 共 3 步：清理所有网络相关 sysctl 参数文件"
-    delete_net_files || return 1
-
-    info "第 2 步 / 共 3 步：干净写入 BBR 配置"
+    info "第 1 步 / 共 2 步：写入 BBR 配置"
     cat > "$CONF_FILE" <<'EOF'
 # BBR 拥塞控制
 net.core.default_qdisc = fq
@@ -171,7 +170,7 @@ net.ipv4.tcp_congestion_control = bbr
 EOF
     ok "已写入 $CONF_FILE"
 
-    info "第 3 步 / 共 3 步：应用并验证"
+    info "第 2 步 / 共 2 步：应用并验证"
     sysctl --system > /dev/null
     sysctl -w net.ipv4.tcp_congestion_control=bbr > /dev/null
     if sysctl -w net.core.default_qdisc=fq > /dev/null 2>&1; then
@@ -185,7 +184,7 @@ EOF
         ok "BBR 已启用"
         echo "  拥塞控制: $(sysctl -n net.ipv4.tcp_congestion_control)"
         echo "  默认队列: $(sysctl -n net.core.default_qdisc)"
-        info "提示: 现有网卡队列将在重启后统一生效"
+        info "提示: 现有网卡队列将在重启后统一生效；BBR 与调优配置互不冲突，可叠加"
     else
         err "验证失败，BBR 未生效"
         return 1
@@ -193,7 +192,7 @@ EOF
 }
 
 #-------------------------------------------------------------
-# 删除 BBR: 只清理所有网络参数文件
+# 删除全部配置: 清理所有网络参数文件，恢复默认
 #-------------------------------------------------------------
 
 disable_bbr() {
@@ -207,12 +206,12 @@ disable_bbr() {
     sysctl -w net.ipv4.tcp_congestion_control=cubic > /dev/null 2>&1 || true
     sysctl -w net.core.default_qdisc=pfifo_fast > /dev/null 2>&1 || true
 
-    ok "BBR 已删除，拥塞控制已恢复默认"
+    ok "BBR、调优与高并发配置已全部删除，拥塞控制已恢复默认"
     info "其余网络参数将在重启后恢复内核默认"
 }
 
 #-------------------------------------------------------------
-# TCP 调优: 按带宽×延迟计算缓冲区 → 干净写入
+# TCP 调优: 按带宽×延迟计算缓冲区 → 写入独立配置文件
 #-------------------------------------------------------------
 
 # 解析带宽输入为 bps。支持格式: 1000 / 500M / 1G / 100K / 1Gbps / 200Mbps / 125MB/s
@@ -278,12 +277,8 @@ tune_tcp() {
     check_root
     check_os
     echo
-    info "第 1 步 / 共 3 步：清理所有网络相关 sysctl 参数文件"
-    delete_net_files || return 1
-    info "提示: 若之前开启过 BBR，其配置已随清理一并移除"
-
     local bw rtt bps ms bdp buf dflt mem_total mem_cap ans cur_max cur_rmem r
-    info "第 2 步 / 共 3 步：输入网络参数"
+    info "第 1 步 / 共 2 步：输入网络参数"
     echo -e "  带宽格式: ${BLUE}1000 / 500M / 1G / 1Gbps / 125MB/s${NC}"
     while :; do
         read -r -p "  请输入网络带宽: " bw
@@ -336,8 +331,8 @@ tune_tcp() {
         *) warn "已取消操作"; return 1 ;;
     esac
 
-    info "第 3 步 / 共 3 步：写入并应用"
-    cat > "$CONF_FILE" <<EOF
+    info "第 2 步 / 共 2 步：写入并应用"
+    cat > "$TUNE_CONF" <<EOF
 # TCP 缓冲区调优
 # 带宽 ${bw} × 延迟 ${rtt} → BDP ≈ $(human_size "$bdp")，缓冲区上限取 2×BDP
 net.core.rmem_max = $buf
@@ -347,7 +342,7 @@ net.ipv4.tcp_wmem = 4096 $dflt $buf
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_notsent_lowat = 131072   # 高吞吐低延迟：未发送数据阈值
 EOF
-    ok "已写入 $CONF_FILE"
+    ok "已写入 $TUNE_CONF"
     sysctl --system > /dev/null
 
     cur_max=$(sysctl -n net.core.rmem_max 2>/dev/null)
@@ -363,23 +358,19 @@ EOF
         err "验证失败，缓冲区未生效"
         return 1
     fi
-    info "提示: 本次调优不包含 BBR；如需开启 BBR 请选择菜单 1"
+    info "提示: 调优与 BBR、高并发配置互不冲突，可叠加生效"
 }
 
 #-------------------------------------------------------------
-# 高并发调优: 大并发服务器阈值参数 → 干净写入
+# 高并发调优: 大并发服务器阈值参数 → 写入独立配置文件
 #-------------------------------------------------------------
 
 tune_concurrency() {
     check_root
     check_os
     echo
-    info "第 1 步 / 共 3 步：清理所有网络相关 sysctl 参数文件"
-    delete_net_files || return 1
-    info "提示: 若之前开启过 BBR 或调优，其配置已随清理一并移除"
-
-    info "第 2 步 / 共 3 步：写入高并发阈值参数"
-    cat > "$CONF_FILE" <<'EOF'
+    info "第 1 步 / 共 2 步：写入高并发阈值参数"
+    cat > "$CONC_CONF" <<'EOF'
 # 服务器高并发阈值调优
 net.core.somaxconn = 65535                # 监听队列上限
 net.ipv4.tcp_max_syn_backlog = 65535      # SYN 队列
@@ -388,9 +379,9 @@ net.ipv4.ip_local_port_range = 1024 65535 # 本地端口池
 net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_fin_timeout = 30             # 缩短 TIME_WAIT 回收
 EOF
-    ok "已写入 $CONF_FILE"
+    ok "已写入 $CONC_CONF"
 
-    info "第 3 步 / 共 3 步：应用并验证"
+    info "第 2 步 / 共 2 步：应用并验证"
     sysctl --system > /dev/null
     if [[ "$(sysctl -n net.core.somaxconn 2>/dev/null)" == "65535" ]]; then
         ok "高并发阈值已应用"
@@ -403,6 +394,7 @@ EOF
         err "验证失败，高并发阈值未生效"
         return 1
     fi
+    info "提示: 高并发与 BBR、调优配置互不冲突，可叠加生效"
 }
 
 #-------------------------------------------------------------
@@ -417,7 +409,7 @@ show_menu() {
     echo -e "${BOLD}  Debian BBR 一键管理脚本${NC}"
     echo "────────────────────────────────────────────"
     echo "  1) 开启 BBR"
-    echo "  2) 删除 BBR"
+    echo "  2) 删除全部配置"
     echo "  3) TCP 调优"
     echo "  4) 高并发调优"
     echo "  0) 退出"
