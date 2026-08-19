@@ -30,10 +30,8 @@ sudo bash bbr.sh
 交互菜单：
 
 ```
-  1) 开启 BBR
-  2) 删除全部配置
-  3) TCP 调优
-  4) 高并发调优
+  1) 开启 BBR    2) 删除全部配置
+  3) TCP 调优    4) 高并发调优
   0) 退出
 ```
 
@@ -58,7 +56,7 @@ BDP = 带宽 × 延迟 / 8
 缓冲区上限 = 2 × BDP
 ```
 
-- 输入格式示例：带宽 `1000 / 500M / 1G / 1Gbps / 125MB/s`；延迟 `20 / 30ms / 0.5s`
+- 输入仅支持纯数字：带宽单位固定为 **Mbps**（如 `1000`），延迟单位固定为 **ms**（如 `20`）；不再支持 `M`/`G`/`MB/s`/`s` 等后缀
 - 写入参数：`net.core.rmem_max`、`net.core.wmem_max`、`net.ipv4.tcp_rmem`、`net.ipv4.tcp_wmem`、`net.ipv4.tcp_slow_start_after_idle = 0`、`net.ipv4.tcp_notsent_lowat = 131072`
 - 缓冲区上限限制在 `[1MB, 64MB]` 内，且不超过系统总内存的 1/8，防止大 BDP 场景耗尽内存；默认缓冲区取上限的一半，并限制在 `256KB` 到 `4MB` 之间
 - 脚本摘要中的 `KB`/`MB` 按 `1024` 进位显示；例如 `1G × 20ms` → BDP 约 `2.4 MB`（实际约 2.5 MB）→ 上限约 `4.8 MB`

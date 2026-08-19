@@ -167,8 +167,7 @@ check_kernel() {
     local major
     major=$(uname -r | awk -F. '{print $1+0}')
     if (( major < 6 )); then
-        err "当前内核 $(uname -r) 过旧，本脚本要求内核 6.0 及以上"
-        echo "  Debian 12 默认内核 6.1、Ubuntu 24.04 默认内核 6.8，请先升级系统"
+        err "当前内核 $(uname -r) 过旧，要求内核 6.0+；Debian 12 默认 6.1、Ubuntu 24.04 默认 6.8，请先升级系统"
         return 1
     fi
     return 0
@@ -239,7 +238,7 @@ delete_net_files() {
         info "未发现网络相关 sysctl 参数文件，无需清理"
         return 0
     fi
-    warn "以下文件将被永久删除（不做备份，匹配文件中的其他 net.* 参数也会一并删除）："
+    warn "将永久删除（无备份，文件内其他 net.* 参数也会一并删除）:"
     for f in "${files[@]}"; do
         echo -e "    ${RED}✗${NC} $f"
     done
@@ -284,7 +283,6 @@ enable_bbr() {
     fi
 
     echo
-    info "第 1 步 / 共 2 步：写入 BBR 配置"
     if ! write_config_atomic "$CONF_FILE" <<'EOF'
 # BBR 拥塞控制
 net.core.default_qdisc = fq
@@ -296,7 +294,6 @@ EOF
     fi
     ok "已写入 $CONF_FILE"
 
-    info "第 2 步 / 共 2 步：应用并验证"
     if ! apply_sysctl_system > /dev/null; then
         initial_system_failed=1
         err "sysctl --system 应用失败；配置文件已保留，运行时状态仍需验证"
@@ -306,10 +303,8 @@ EOF
         return 1
     fi
 
-    if sysctl -w net.core.default_qdisc=fq > /dev/null 2>&1; then
-        ok "队列调度 = fq"
-    else
-        warn "fq 队列不可用，降级为仅开启 BBR"
+    if ! sysctl -w net.core.default_qdisc=fq > /dev/null 2>&1; then
+        warn "fq 不可用，降级为仅 BBR"
         fallback=1
         if ! write_config_atomic "$CONF_FILE" <<'EOF'
 net.ipv4.tcp_congestion_control = bbr
@@ -318,7 +313,6 @@ EOF
             err "BBR 降级配置写入失败；原配置文件仍可能保留"
             return 1
         fi
-        warn "已将持久化配置降级为仅 BBR"
         if ! apply_sysctl_system > /dev/null; then
             err "降级后的 sysctl --system 应用仍失败；配置文件已保留"
             return 1
@@ -334,9 +328,7 @@ EOF
             err "验证失败，降级后的 BBR 未生效"
             return 1
         fi
-        ok "BBR 已启用（未启用 fq）"
-        echo "  拥塞控制: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
-        warn "当前队列调度未切换为 fq；BBR 配置已持久化"
+        ok "BBR 已启用（bbr，无 fq）"
     elif ! verify_sysctl_values \
         net.ipv4.tcp_congestion_control bbr \
         net.core.default_qdisc fq; then
@@ -347,12 +339,10 @@ EOF
             err "sysctl --system 曾应用失败，未将本次操作报告为完全成功"
             return 1
         fi
-        ok "BBR 已启用"
-        echo "  拥塞控制: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
-        echo "  默认队列: $(sysctl -n net.core.default_qdisc 2>/dev/null)"
+        ok "BBR 已启用（bbr + fq）"
     fi
 
-    info "提示: 现有网卡队列将在重启后统一生效；BBR 与调优配置互不冲突，可叠加"
+    info "网卡队列在重启后统一生效"
     return 0
 }
 
@@ -366,7 +356,6 @@ disable_bbr() {
     check_root || return 1
     require_commands sysctl || return 1
     echo
-    info "删除所有网络相关 sysctl 参数文件"
     delete_net_files || return 1
 
     # 重新应用剩余配置，并立即恢复 BBR 相关运行时值
@@ -401,66 +390,44 @@ disable_bbr() {
 # TCP 调优: 按带宽×延迟计算缓冲区 → 写入独立配置文件
 #-------------------------------------------------------------
 
-# 解析带宽输入为 bps。支持格式: 1000 / 500M / 1G / 100K / 1Gbps / 200Mbps / 125MB/s
-# 裸数字按 Mbps 处理；字节速率自动 ×8 转比特速率
+# 解析带宽输入为 bps。仅支持纯数字，单位固定为 Mbps
 # 成功: 输出整数 bps 并返回 0；格式错误: 返回 1；空输入: 返回 2
 parse_bw() {
-    local input num unit mult byte bps
+    local input bps
     [[ $# -eq 1 ]] || return 1
     input=${1// /}
     [[ -z "$input" ]] && return 2
-    input=$(tr '[:upper:]' '[:lower:]' <<<"$input")
-    byte=1
-    case "$input" in
-        *b/s) byte=8; input=${input%b/s} ;;
-    esac
-    input=$(sed -E 's/(bps|bit)$//' <<<"$input")
-    num=$(sed -E 's/[a-z]+$//' <<<"$input")
-    unit=${input#"$num"}
-    [[ "$num" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
-    case "$unit" in
-        "")    mult=1000000 ;;    # 裸数字按 Mbps
-        k|kb)  mult=1000 ;;
-        m|mb)  mult=1000000 ;;
-        g|gb)  mult=1000000000 ;;
-        *)     return 1 ;;
-    esac
-    if ! bps=$(awk -v n="$num" -v m="$mult" -v b="$byte" 'BEGIN {
-        value = n * m * b
+    [[ "$input" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
+    if ! bps=$(awk -v n="$input" 'BEGIN {
+        value = n * 1000000
         if (value != value || value <= 0 || value > 9000000000000000000) exit 1
+        rounded = sprintf("%.0f", value)
+        if (rounded + 0 <= 0) exit 1
         printf "%.0f", value
     }'); then
         return 1
     fi
-    [[ "$bps" =~ ^[0-9]+$ ]] || return 1
     echo "$bps"
     return 0
 }
 
-# 解析延迟输入为毫秒。支持格式: 20 / 30ms / 0.5s / 1000
-# 裸数字按 ms 处理。成功: 输出毫秒并返回 0；格式错误: 返回 1；空输入: 返回 2
+# 解析延迟输入为毫秒。仅支持纯数字，单位固定为 ms
+# 成功: 输出毫秒并返回 0；格式错误: 返回 1；空输入: 返回 2
 parse_rtt() {
-    local input num unit mult ms
+    local input ms
     [[ $# -eq 1 ]] || return 1
     input=${1// /}
     [[ -z "$input" ]] && return 2
-    input=$(tr '[:upper:]' '[:lower:]' <<<"$input")
-    num=$(sed -E 's/(ms|s)$//' <<<"$input")
-    unit=${input#"$num"}
-    [[ "$num" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
-    case "$unit" in
-        ""|ms) mult=1 ;;
-        s)     mult=1000 ;;
-        *)     return 1 ;;
-    esac
-    if ! ms=$(awk -v n="$num" -v m="$mult" 'BEGIN {
-        value = n * m
+    [[ "$input" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
+    if ! ms=$(awk -v n="$input" 'BEGIN {
+        value = n
         if (value != value || value <= 0 || value > 9000000000000000000) exit 1
+        rounded = sprintf("%.3f", value)
+        if (rounded + 0 <= 0) exit 1
         printf "%.3f", value
     }'); then
         return 1
     fi
-    awk -v ms="$ms" 'BEGIN { exit (ms <= 0) }' || return 1
     echo "$ms"
     return 0
 }
@@ -490,35 +457,32 @@ human_size() {
 
 tune_tcp() {
     local bw='' rtt='' bps='' ms='' calculation='' bdp='' buf='' dflt=''
-    local mem_total='' mem_cap='' ans='' cur_rmem='' cur_wmem='' r
+    local mem_total='' mem_cap='' ans='' r
     local min_buf=1048576 max_buf=67108864
 
     check_root || return 1
-    require_commands awk grep sed sysctl dpkg || return 1
+    require_commands awk grep sysctl dpkg || return 1
     check_os || return 1
     echo
-    info "第 1 步 / 共 2 步：输入网络参数"
-    echo -e "  带宽格式: ${BLUE}1000 / 500M / 1G / 1Gbps / 125MB/s${NC}"
     while :; do
-        if ! read -r -p "  请输入网络带宽: " bw; then
+        if ! read -r -p "  带宽 (Mbps): " bw; then
             warn "未读取到带宽输入，已取消操作"
             return 1
         fi
         bps=$(parse_bw "$bw"); r=$?
         (( r == 2 )) && { warn "已取消操作"; return 1; }
         (( r == 0 )) && break
-        err "  带宽格式无效，请参考示例重新输入"
+        err "  请输入数字"
     done
-    echo -e "  延迟格式: ${BLUE}20 / 30ms / 0.5s${NC}"
     while :; do
-        if ! read -r -p "  请输入连接延迟 RTT: " rtt; then
+        if ! read -r -p "  延迟 (ms): " rtt; then
             warn "未读取到 RTT 输入，已取消操作"
             return 1
         fi
         ms=$(parse_rtt "$rtt"); r=$?
         (( r == 2 )) && { warn "已取消操作"; return 1; }
         (( r == 0 )) && break
-        err "  延迟格式无效，请参考示例重新输入"
+        err "  请输入数字"
     done
 
     # BDP = 带宽 × 延迟 / 8；缓冲区上限取 2×BDP
@@ -566,12 +530,8 @@ tune_tcp() {
     (( dflt < 262144 )) && dflt=262144
 
     echo
-    info "计算摘要:"
-    echo "  带宽: $bw / 延迟: $rtt"
-    echo "  BDP ≈ $(human_size "$bdp")"
-    echo "  缓冲区上限: $(human_size "$buf")"
-    echo "  默认缓冲区: $(human_size "$dflt")"
-    if ! read -r -p "  确认写入？[y/N] " ans; then
+    echo "  BDP ≈ $(human_size "$bdp")  上限 $(human_size "$buf")  默认 $(human_size "$dflt")"
+    if ! read -r -p "  确认?[y/N] " ans; then
         warn "未读取到确认输入，已取消操作"
         return 1
     fi
@@ -580,7 +540,6 @@ tune_tcp() {
         *) warn "已取消操作"; return 1 ;;
     esac
 
-    info "第 2 步 / 共 2 步：写入并应用"
     if ! write_config_atomic "$TUNE_CONF" <<EOF
 # TCP 缓冲区调优
 # 带宽 ${bw} × 延迟 ${rtt} → BDP ≈ $(human_size "$bdp")，缓冲区上限取 2×BDP
@@ -610,15 +569,7 @@ EOF
         err "验证失败，TCP 调优未完全生效"
         return 1
     fi
-    cur_rmem=$(sysctl -n net.ipv4.tcp_rmem 2>/dev/null)
-    cur_wmem=$(sysctl -n net.ipv4.tcp_wmem 2>/dev/null)
-    ok "TCP 缓冲区已应用"
-    echo "  rmem_max / wmem_max: $(human_size "$buf")"
-    echo "  tcp_rmem: $cur_rmem"
-    echo "  tcp_wmem: $cur_wmem"
-    echo "  slow_start_after_idle: $(sysctl -n net.ipv4.tcp_slow_start_after_idle 2>/dev/null)"
-    echo "  notsent_lowat: $(sysctl -n net.ipv4.tcp_notsent_lowat 2>/dev/null)"
-    info "提示: 调优与 BBR、高并发配置互不冲突，可叠加生效"
+    ok "TCP 调优已生效"
     return 0
 }
 
@@ -628,10 +579,9 @@ EOF
 
 tune_concurrency() {
     check_root || return 1
-    require_commands awk grep sed sysctl dpkg || return 1
+    require_commands awk grep sysctl dpkg || return 1
     check_os || return 1
     echo
-    info "第 1 步 / 共 2 步：写入高并发阈值参数"
     if ! write_config_atomic "$CONC_CONF" <<'EOF'
 # 服务器高并发阈值调优
 net.core.somaxconn = 65535                # 监听队列上限
@@ -647,7 +597,6 @@ EOF
     fi
     ok "已写入 $CONC_CONF"
 
-    info "第 2 步 / 共 2 步：应用并验证"
     if ! apply_sysctl_system > /dev/null; then
         err "高并发配置已保存，但 sysctl --system 应用失败"
         return 1
@@ -662,14 +611,7 @@ EOF
         err "验证失败，高并发阈值未完全生效"
         return 1
     fi
-    ok "高并发阈值已应用"
-    echo "  somaxconn: $(sysctl -n net.core.somaxconn 2>/dev/null)"
-    echo "  tcp_max_syn_backlog: $(sysctl -n net.ipv4.tcp_max_syn_backlog 2>/dev/null)"
-    echo "  netdev_max_backlog: $(sysctl -n net.core.netdev_max_backlog 2>/dev/null)"
-    echo "  ip_local_port_range: $(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null)"
-    echo "  tcp_syncookies: $(sysctl -n net.ipv4.tcp_syncookies 2>/dev/null)"
-    echo "  tcp_fin_timeout: $(sysctl -n net.ipv4.tcp_fin_timeout 2>/dev/null)"
-    info "提示: 高并发与 BBR、调优配置互不冲突，可叠加生效"
+    ok "高并发调优已生效"
     return 0
 }
 
@@ -682,21 +624,17 @@ show_menu() {
     cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
     rmem=$(sysctl -n net.core.rmem_max 2>/dev/null)
     clear
-    echo -e "${BOLD}  Debian BBR 一键管理脚本${NC}"
-    echo "────────────────────────────────────────────"
-    echo "  1) 开启 BBR"
-    echo "  2) 删除全部配置"
-    echo "  3) TCP 调优"
-    echo "  4) 高并发调优"
+    echo -e "${BOLD}  Debian BBR 管理脚本${NC}"
+    echo "  1) 开启 BBR    2) 删除全部配置"
+    echo "  3) TCP 调优    4) 高并发调优"
     echo "  0) 退出"
-    echo "────────────────────────────────────────────"
-    echo -e "  当前拥塞控制: ${cc:-未设置}    缓冲区上限: $(human_size "${rmem:-0}")"
+    echo -e "  拥塞控制: ${cc:-未设置}  缓冲区上限: $(human_size "${rmem:-0}")"
 }
 
 main() {
     local choice=''
 
-    require_commands awk grep sed readlink sysctl dpkg || return 1
+    require_commands awk grep readlink sysctl dpkg || return 1
     check_root || return 1
     while true; do
         show_menu
@@ -710,10 +648,10 @@ main() {
             3) tune_tcp ;;
             4) tune_concurrency ;;
             0) echo "  已退出"; return 0 ;;
-            *) warn "  无效输入，请重新选择" ;;
+            *) warn "无效选择" ;;
         esac
         echo
-        if ! read -r -p "  按回车键返回菜单..."; then
+        if ! read -r -p "  回车继续..."; then
             warn "未读取到返回菜单输入，已退出"
             return 0
         fi

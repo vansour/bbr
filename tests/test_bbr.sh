@@ -105,11 +105,26 @@ test_source_does_not_run_menu() {
     [[ "$output" == '__LOADED__' ]]
 }
 
-test_parsers_remain_compatible() {
+test_parsers_accept_bare_numbers_only() {
     bash -c '
         source "$1"
-        [[ "$(parse_bw 125MB/s)" == 1000000000 ]]
-        [[ "$(parse_rtt 0.5s)" == 500.000 ]]
+        [[ "$(parse_bw 1000)" == 1000000000 ]] || { echo "parse_bw 1000 -> $(parse_bw 1000)" >&2; exit 1; }
+        [[ "$(parse_bw 100)" == 100000000 ]] || { echo "parse_bw 100 -> $(parse_bw 100)" >&2; exit 1; }
+        [[ "$(parse_bw 0.5)" == 500000 ]] || { echo "parse_bw 0.5 -> $(parse_bw 0.5)" >&2; exit 1; }
+        [[ "$(parse_rtt 20)" == 20.000 ]] || { echo "parse_rtt 20 -> $(parse_rtt 20)" >&2; exit 1; }
+        [[ "$(parse_rtt 0.5)" == 0.500 ]] || { echo "parse_rtt 0.5 -> $(parse_rtt 0.5)" >&2; exit 1; }
+    ' _ "$SCRIPT"
+}
+
+test_parsers_reject_suffixed_values() {
+    bash -c '
+        source "$1"
+        ! parse_bw 125MB/s || exit 1
+        ! parse_bw 500M || exit 1
+        ! parse_bw 1G || exit 1
+        ! parse_bw 1Gbps || exit 1
+        ! parse_rtt 30ms || exit 1
+        ! parse_rtt 0.5s || exit 1
     ' _ "$SCRIPT"
 }
 
@@ -217,7 +232,7 @@ test_tune_tcp_verifies_every_written_value() {
     chmod +x "$fakebin/modprobe"
     make_fake_os_release "$os_release"
     make_fake_meminfo "$meminfo"
-    printf '1000\n20ms\ny\n' |
+    printf '1000\n20\ny\n' |
         PATH="$fakebin:$PATH" TUNE_CONF="$conf" OS_RELEASE_FILE="$os_release" \
         MEMINFO_FILE="$meminfo" FAKE_SYSCTL_STATE="$state" \
         FAKE_SYSCTL_FILES="$conf" bash -c 'source "$1"; tune_tcp' _ "$SCRIPT" \
@@ -238,7 +253,7 @@ test_tune_tcp_rejects_partial_verification() {
     chmod +x "$fakebin/modprobe"
     make_fake_os_release "$os_release"
     make_fake_meminfo "$meminfo"
-    printf '1000\n20ms\ny\n' |
+    printf '1000\n20\ny\n' |
         PATH="$fakebin:$PATH" TUNE_CONF="$conf" OS_RELEASE_FILE="$os_release" \
         MEMINFO_FILE="$meminfo" FAKE_SYSCTL_STATE="$state" \
         FAKE_SYSCTL_FILES="$conf" FAKE_MISMATCH_KEY=net.ipv4.tcp_notsent_lowat \
@@ -285,7 +300,8 @@ test_menu_smoke_exits_on_zero() {
 }
 
 run_test 'sourcing does not run menu' test_source_does_not_run_menu
-run_test 'parsers preserve valid formats' test_parsers_remain_compatible
+run_test 'parsers accept bare numbers as Mbps and ms' test_parsers_accept_bare_numbers_only
+run_test 'parsers reject suffixed values' test_parsers_reject_suffixed_values
 run_test 'parsers reject invalid and overflowing values' test_parsers_reject_invalid_and_overflowing_values
 run_test 'missing dependencies are reported' test_missing_dependency_is_reported
 run_test 'atomic writer rejects missing target directory' test_atomic_writer_rejects_missing_target_directory
